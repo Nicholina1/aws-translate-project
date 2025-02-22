@@ -1,53 +1,90 @@
-
 import boto3
 import json
+from translation_app import translate_language, upload_request_text, upload_translated_text
+from botocore.exceptions import ClientError
+import time
+import os
+from typing import Dict, Any
 
-def lambda_handler(event, context):
-    s3 = boto3.client('s3')
-    translate = boto3.client('translate')
 
-    # Get the object from the event
-    bucket_name = event['Records'][0]['s3']['bucket']['name']
-    key = event['Records'][0]['s3']['object']['key']
-    print(bucket_name)
-    print(key)
+############# refactored code by amazonQ #######
+
+def get_environment_variables() -> Dict[str, str]:
+    """Retrieve and validate required environment variables."""
+    required_vars = ['REQUEST_BUCKET', 'RESPONSE_BUCKET']
+    env_vars = {}
+    
+    for var in required_vars:
+        if (value := os.environ.get(var)) is None:
+            raise ValueError(f"Missing required environment variable: {var}")
+        env_vars[var] = value
+    
+    return env_vars
+
+def parse_request(event: Dict[str, Any]) -> Dict[str, str]:
+    """Parse and validate the incoming request."""
     try:
-        # Download the file from S3
-        obj = s3.get_object(Bucket=bucket_name, Key=key)
-        file_content = obj['Body'].read().decode('utf-8')
-        data = json.loads(file_content)
-        print(data)
-        # Translate each sentence
-        translated_data = []
-        for item in data:
-            result = translate.translate_text(
-                Text=item['text'],
-                SourceLanguageCode="en",  # Change as needed
-                TargetLanguageCode="es"   # Change as needed
-            )
-            translated_data.append({
-                "original": item['text'],
-                "translated": result['TranslatedText']
-            })
-        print(translated_data)
-        # Save the translated data to a new JSON file
-        output_key = f"translated_{key}"
-        s3.put_object(
-            Bucket=context.function_name.split('-')[0],  # Use environment variable for bucket name
-            Key=output_key,
-            Body=json.dumps(translated_data, ensure_ascii=False).encode('utf-8')
-        )
+        request = json.loads(event['body'])
+        required_fields = ['src_locale', 'target_locale', 'input_text']
+        
+        for field in required_fields:
+            if field not in request:
+                raise ValueError(f"Missing required field: {field}")
+        
+        return request
+    except (json.JSONDecodeError, KeyError) as e:
+        raise ValueError(f"Invalid request format: {str(e)}")
 
-        return {
-            'statusCode': 200,
-            'body': json.dumps(f"File {key} translated successfully!")
-        }
+def create_response(status_code: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a standardized API response."""
+    return {
+        'statusCode': status_code,
+        'headers': {
+            'Content-Type': 'application/json'
+        },
+        'body': json.dumps(body)
+    }
 
+def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """Main Lambda handler function."""
+    print('request:', json.dumps(event))
+    
+    try:
+        # Get environment variables
+        env_vars = get_environment_variables()
+        
+        # Parse request
+        request = parse_request(event)
+        print("request:", request)
+        
+        # Extract request parameters
+        src_locale = request['src_locale']
+        target_locale = request['target_locale']
+        input_text = request['input_text']
+        
+        # Perform translation
+        start = time.perf_counter()
+        translations = translate_language(src_locale, target_locale, input_text)
+        time_diff = time.perf_counter() - start
+
+        print(f"Translation result type: {type(translations)}")
+        print(f"Translation result: {translations}")
+        
+        # Upload to S3
+        # data = json.dumps(input_text)
+        # upload_request_text(env_vars['REQUEST_BUCKET'], data)
+        # upload_translated_text(env_vars['RESPONSE_BUCKET'], translations)
+        
+        
+        return create_response(200, translations)
+        
+    except ValueError as e:
+        return create_response(400, {"error": str(e)})
+    except ClientError as e:
+        return create_response(500, {"error": e.response['Error']['Code']})
     except Exception as e:
-        return {
-            'statusCode': 500,
-            'body': json.dumps(f"Error processing file: {str(e)}")
-        }
+        return create_response(500, {"error": f"Unexpected error: {str(e)}"})
+
 
 
 
